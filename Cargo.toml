@@ -1,0 +1,13 @@
+[package]
+name = "text-llm-plugin"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+magi-pdk = { workspace = true, features = ["guest"] }
+extism-pdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
