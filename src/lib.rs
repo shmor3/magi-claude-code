@@ -1,48 +1,54 @@
-//! Text-LLM Plugin - Standalone text-to-text language model processing
+//! Claude Code ACP Agent Plugin
 //!
-//! This WASM plugin processes text input and returns text output.
-//! It follows the same pattern as instruct/reason plugins:
-//! - Plugin is lightweight WASM (portable, sandboxed)
-//! - Calls run_inference() which runs on the host with GPU/CUDA
-//! - Host runs the Candle language model with GPU acceleration
-//!
-//! This is the correct architecture because:
-//! - WASM cannot directly access CUDA/GPU
-//! - Keeps plugins small and fast
-//! - Host manages model loading and GPU resources
+//! WASM plugin that registers as an ACP agent with code generation,
+//! code review, and code explanation capabilities. Communicates via
+//! the ACP host functions (agent_register, agent_send, agent_receive).
 
 use magi_pdk::*;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 
-/// Plugin configuration
+const AGENT_NAME: &str = "claude-code";
+const AGENT_DESCRIPTION: &str = "Code generation, review, and refactoring agent";
+
+const CAPABILITIES: &[(&str, &str)] = &[
+    (
+        "code-generation",
+        "Generate code from natural language descriptions",
+    ),
+    (
+        "code-review",
+        "Review code for bugs, style issues, and improvements",
+    ),
+    (
+        "code-explanation",
+        "Explain what a piece of code does",
+    ),
+    (
+        "code-refactor",
+        "Suggest refactoring improvements for code",
+    ),
+];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TextLlmConfig {
-    /// System prompt
-    pub system_prompt: String,
-    /// Model ID to use (e.g., "qwen2-0.5b", "deepseek-r1-1.5b")
-    pub model_id: String,
-    /// Maximum tokens to generate
-    pub max_tokens: u32,
-    /// Temperature for sampling
-    pub temperature: f32,
+struct AgentConfig {
+    max_response_length: usize,
+    auto_poll: bool,
 }
 
-impl Default for TextLlmConfig {
+impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            system_prompt: "You are a helpful AI assistant.".to_string(),
-            model_id: "qwen2-0.5b".to_string(),
-            max_tokens: 150,
-            temperature: 0.7,
+            max_response_length: 4096,
+            auto_poll: true,
         }
     }
 }
 
 struct PluginState {
-    config: TextLlmConfig,
-    node_id: String,
-    process_count: u64,
+    agent_id: String,
+    config: AgentConfig,
+    messages_processed: u64,
     running: bool,
     started_at_ms: u64,
 }
@@ -59,249 +65,262 @@ fn with_state_mut<T, F: FnOnce(&mut PluginState) -> T>(f: F) -> Option<T> {
     STATE.with(|s| s.borrow_mut().as_mut().map(f))
 }
 
-fn config_from_datatype(dt: &DataType) -> TextLlmConfig {
-    let mut config = TextLlmConfig::default();
+fn config_from_datatype(dt: &DataType) -> AgentConfig {
+    let mut config = AgentConfig::default();
     if let DataType::Map(map) = dt {
-        if let Some(DataType::String(s)) = map.get("system_prompt") {
-            config.system_prompt = s.clone();
-        }
-        if let Some(DataType::String(s)) = map.get("model_id") {
-            config.model_id = s.clone();
-        }
-        if let Some(v) = map.get("max_tokens") {
+        if let Some(v) = map.get("max_response_length") {
             if let Some(n) = v.as_u32() {
-                config.max_tokens = n;
-            } else if let Some(n) = v.as_i32() {
-                config.max_tokens = n as u32;
+                config.max_response_length = n as usize;
             }
         }
-        if let Some(DataType::Float32(f)) = map.get("temperature") {
-            config.temperature = *f;
-        }
-        if let Some(DataType::Float64(f)) = map.get("temperature") {
-            config.temperature = *f as f32;
+        if let Some(DataType::Bool(b)) = map.get("auto_poll") {
+            config.auto_poll = *b;
         }
     }
     config
 }
 
-/// Run inference via host call_handler, with fallback for when host handler is unavailable
-fn run_inference(prompt: &str, config: &TextLlmConfig) -> String {
-    #[derive(Serialize)]
-    struct InferenceRequest {
-        prompt: String,
-        model_id: String,
-        max_tokens: u32,
-        temperature: f32,
-    }
+/// Handle a capability request from another agent.
+fn handle_capability_request(capability: &str, payload: &serde_json::Value) -> serde_json::Value {
+    let input = payload
+        .get("input")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
-    #[derive(Deserialize)]
-    struct InferenceResponse {
-        text: String,
-    }
-
-    let request = InferenceRequest {
-        prompt: prompt.to_string(),
-        model_id: config.model_id.clone(),
-        max_tokens: config.max_tokens,
-        temperature: config.temperature,
-    };
-
-    match call_handler::<_, InferenceResponse>("run_inference", &request) {
-        Ok(response) => response.text,
-        Err(e) => {
-            log_warn(&format!(
-                "Host inference unavailable ({}), using echo fallback",
-                e
-            ));
-            format!("[model:{} not loaded] Echo: {}", config.model_id, prompt)
+    match capability {
+        "code-generation" => {
+            log_info(&format!("Code generation request: {} chars", input.len()));
+            serde_json::json!({
+                "status": "accepted",
+                "capability": capability,
+                "message": format!("Code generation request received ({} chars)", input.len()),
+                "request_id": now_ms().to_string(),
+            })
+        }
+        "code-review" => {
+            log_info(&format!("Code review request: {} chars", input.len()));
+            serde_json::json!({
+                "status": "accepted",
+                "capability": capability,
+                "message": format!("Code review request received ({} chars)", input.len()),
+                "request_id": now_ms().to_string(),
+            })
+        }
+        "code-explanation" => {
+            log_info(&format!("Code explanation request: {} chars", input.len()));
+            serde_json::json!({
+                "status": "accepted",
+                "capability": capability,
+                "message": format!("Code explanation request received ({} chars)", input.len()),
+                "request_id": now_ms().to_string(),
+            })
+        }
+        "code-refactor" => {
+            log_info(&format!("Code refactor request: {} chars", input.len()));
+            serde_json::json!({
+                "status": "accepted",
+                "capability": capability,
+                "message": format!("Refactoring request received ({} chars)", input.len()),
+                "request_id": now_ms().to_string(),
+            })
+        }
+        other => {
+            log_warn(&format!("Unknown capability requested: {}", other));
+            serde_json::json!({
+                "status": "error",
+                "message": format!("Unknown capability: {}", other),
+            })
         }
     }
 }
 
-/// Initialize the plugin
+/// Initialize the plugin — registers as an ACP agent.
 #[plugin_fn]
 pub fn init(input: Json<DataType>) -> FnResult<Json<DataType>> {
-    let input_map = match &input.0 {
-        DataType::Map(map) => map,
-        _ => {
-            return Ok(Json(DataType::Map(
-                [
-                    ("success".to_string(), DataType::Bool(false)),
-                    (
-                        "error".to_string(),
-                        DataType::String("Input must be a map".to_string()),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-            )))
+    let config = match &input.0 {
+        DataType::Map(map) => map
+            .get("config")
+            .map(config_from_datatype)
+            .unwrap_or_default(),
+        _ => AgentConfig::default(),
+    };
+
+    log_info("Claude Code ACP agent initializing...");
+
+    let agent_id = match agent_register(AGENT_NAME, AGENT_DESCRIPTION, CAPABILITIES) {
+        Ok(id) => {
+            log_info(&format!("Registered as ACP agent: {}", id));
+            id
+        }
+        Err(e) => {
+            log_error(&format!("Failed to register ACP agent: {}", e));
+            return Ok(Json(
+                DataType::map()
+                    .insert("success", false)
+                    .insert("error", format!("ACP registration failed: {}", e))
+                    .build(),
+            ));
         }
     };
 
-    let node_id = input_map
-        .get("node_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("text-llm")
-        .to_string();
-
-    // Parse config from input, falling back to defaults
-    let config = input_map
-        .get("config")
-        .map(config_from_datatype)
-        .unwrap_or_default();
-
-    log_info(&format!(
-        "Text-LLM plugin initializing with node: {}, model: {}, max_tokens: {}",
-        node_id, config.model_id, config.max_tokens
-    ));
-
     STATE.with(|s| {
         *s.borrow_mut() = Some(PluginState {
+            agent_id: agent_id.clone(),
             config,
-            node_id,
-            process_count: 0,
+            messages_processed: 0,
             running: false,
             started_at_ms: 0,
         });
     });
 
-    Ok(Json(DataType::Map(
-        [
-            ("success".to_string(), DataType::Bool(true)),
-            ("error".to_string(), DataType::Null),
-            (
-                "capabilities".to_string(),
-                DataType::Array(vec![
-                    DataType::String("text_processing".to_string()),
-                    DataType::String("language_model".to_string()),
-                ]),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    )))
+    Ok(Json(
+        DataType::map()
+            .insert("success", true)
+            .insert("agent_id", agent_id)
+            .insert(
+                "capabilities",
+                DataType::Array(
+                    CAPABILITIES
+                        .iter()
+                        .map(|(name, _)| DataType::String(name.to_string()))
+                        .collect(),
+                ),
+            )
+            .build(),
+    ))
 }
 
-/// Start the plugin
+/// Start the plugin.
 #[plugin_fn]
 pub fn start(_: Json<DataType>) -> FnResult<Json<DataType>> {
-    log_info("Text-LLM plugin starting");
-
+    log_info("Claude Code ACP agent starting");
     let now = now_ms();
     with_state_mut(|state| {
         state.running = true;
         state.started_at_ms = now;
     });
 
-    Ok(Json(DataType::Map(
-        [
-            ("success".to_string(), DataType::Bool(true)),
-            (
-                "message".to_string(),
-                DataType::String("Text-LLM plugin started".to_string()),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    )))
+    let _ = subscribe(&["agent.*"], None);
+
+    Ok(Json(
+        DataType::map()
+            .insert("success", true)
+            .insert("message", "Claude Code agent started")
+            .build(),
+    ))
 }
 
-/// Stop the plugin
+/// Stop the plugin.
 #[plugin_fn]
 pub fn stop(_: Json<DataType>) -> FnResult<Json<DataType>> {
-    log_info("Text-LLM plugin stopping");
-
+    log_info("Claude Code ACP agent stopping");
     with_state_mut(|state| {
         state.running = false;
     });
 
-    Ok(Json(DataType::Map(
-        [
-            ("success".to_string(), DataType::Bool(true)),
-            (
-                "message".to_string(),
-                DataType::String("Text-LLM plugin stopped".to_string()),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    )))
+    Ok(Json(
+        DataType::map()
+            .insert("success", true)
+            .insert("message", "Claude Code agent stopped")
+            .build(),
+    ))
 }
 
+/// Process incoming ACP messages.
 #[plugin_fn]
-pub fn process_text(input: Json<DataType>) -> FnResult<Json<DataType>> {
-    let input_map = match &input.0 {
-        DataType::Map(map) => map,
-        _ => {
-            return Ok(Json(DataType::Map(
-                [
-                    ("success".to_string(), DataType::Bool(false)),
-                    (
-                        "error".to_string(),
-                        DataType::String("Input must be a map".to_string()),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-            )));
+pub fn process(_input: Json<DataType>) -> FnResult<Json<DataType>> {
+    let running = with_state(|s| s.running).unwrap_or(false);
+    if !running {
+        return Ok(Json(
+            DataType::map()
+                .insert("success", false)
+                .insert("error", "Agent not running")
+                .build(),
+        ));
+    }
+
+    // Poll for incoming ACP messages
+    let messages = match agent_receive(10) {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            log_warn(&format!("Failed to receive messages: {}", e));
+            return Ok(Json(
+                DataType::map()
+                    .insert("success", true)
+                    .insert("messages_processed", DataType::Int32(0))
+                    .build(),
+            ));
         }
     };
-    let text = input_map
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
 
-    let config = with_state(|s| s.config.clone()).unwrap_or_default();
+    let mut processed = 0u64;
+    let agent_id = with_state(|s| s.agent_id.clone()).unwrap_or_default();
 
-    log_info(&format!("Processing text input: {} chars", text.len()));
+    for msg in &messages {
+        let from = msg.get("from").and_then(|v| v.as_str()).unwrap_or("");
+        let payload = msg
+            .get("payload_json")
+            .and_then(|v| v.as_str())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .or_else(|| msg.get("payload").cloned())
+            .unwrap_or(serde_json::Value::Null);
+
+        let capability = payload
+            .get("capability")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        log_info(&format!("Processing {} request from {}", capability, from));
+
+        let response = handle_capability_request(capability, &payload);
+
+        let reply_payload = serde_json::json!({
+            "response": response,
+            "agent_id": agent_id,
+            "capability": capability,
+        });
+
+        if let Err(e) = agent_send(from, reply_payload) {
+            log_error(&format!("Failed to send reply to {}: {}", from, e));
+        }
+
+        processed += 1;
+    }
 
     with_state_mut(|state| {
-        state.process_count += 1;
+        state.messages_processed += processed;
     });
 
-    // Build prompt and run inference via host
-    let prompt = format!("{}\n\nUser: {}\n\nAssistant:", config.system_prompt, text);
-    let generated_text = run_inference(&prompt, &config);
+    if processed > 0 {
+        let _ = emit_event(serde_json::json!({
+            "type": "PluginOutput",
+            "data": {
+                "plugin_id": agent_id,
+                "messages_processed": processed,
+            }
+        }));
+    }
 
-    // Publish output for graph routing
-    let node_id = with_state(|s| s.node_id.clone()).unwrap_or_else(|| "text-llm".to_string());
-    let _ = publish_event(
-        "plugin.output",
-        &serde_json::json!({
-            "source": node_id,
-            "port": "output",
-            "data_type": "text",
-            "value": generated_text,
-        }),
-    );
-
-    Ok(Json(DataType::Map(
-        [
-            ("success".to_string(), DataType::Bool(true)),
-            (
-                "output".to_string(),
-                DataType::String(generated_text),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    )))
+    Ok(Json(
+        DataType::map()
+            .insert("success", true)
+            .insert("messages_processed", DataType::Uint64(processed))
+            .build(),
+    ))
 }
 
-/// Get plugin status
+/// Get plugin status.
 #[plugin_fn]
 pub fn get_status(_: Json<DataType>) -> FnResult<Json<DataType>> {
-    let (count, running, started_at_ms, config) = with_state(|s| {
+    let (agent_id, count, running, started_at_ms) = with_state(|s| {
         (
-            s.process_count,
+            s.agent_id.clone(),
+            s.messages_processed,
             s.running,
             s.started_at_ms,
-            s.config.clone(),
         )
     })
-    .unwrap_or((0, false, 0, TextLlmConfig::default()));
+    .unwrap_or((String::new(), 0, false, 0));
 
     let uptime_secs = if running && started_at_ms > 0 {
         ((now_ms() - started_at_ms) / 1000) as i32
@@ -309,139 +328,87 @@ pub fn get_status(_: Json<DataType>) -> FnResult<Json<DataType>> {
         0
     };
 
-    Ok(Json(DataType::Map(
-        [
-            ("id".to_string(), DataType::String("text-llm".to_string())),
-            (
-                "name".to_string(),
-                DataType::String("Text LLM Plugin".to_string()),
-            ),
-            ("running".to_string(), DataType::Bool(running)),
-            ("uptime_secs".to_string(), DataType::Int32(uptime_secs)),
-            (
-                "frames_processed".to_string(),
-                DataType::Int64(count as i64),
-            ),
-            ("fps".to_string(), DataType::Float32(0.0)),
-            ("last_error".to_string(), DataType::Null),
-            (
-                "metrics".to_string(),
-                DataType::Map(
-                    [
-                        ("process_count".to_string(), DataType::Int64(count as i64)),
-                        (
-                            "model".to_string(),
-                            DataType::String(config.model_id),
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
+    Ok(Json(
+        DataType::map()
+            .insert("id", AGENT_NAME)
+            .insert("name", "Claude Code Agent")
+            .insert("agent_id", agent_id)
+            .insert("running", running)
+            .insert("uptime_secs", DataType::Int32(uptime_secs))
+            .insert("messages_processed", DataType::Uint64(count))
+            .insert(
+                "capabilities",
+                DataType::Array(
+                    CAPABILITIES
+                        .iter()
+                        .map(|(name, _)| DataType::String(name.to_string()))
+                        .collect(),
                 ),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    )))
+            )
+            .build(),
+    ))
 }
 
-/// Handle input from graph data injection (required for graph execution)
-#[plugin_fn]
-pub fn handle_input(input: Json<DataType>) -> FnResult<Json<DataType>> {
-    let input_map = match &input.0 {
-        DataType::Map(map) => map,
-        _ => {
-            return Ok(Json(DataType::Map(
-                [
-                    ("success".to_string(), DataType::Bool(false)),
-                    (
-                        "error".to_string(),
-                        DataType::String("Input must be a map".to_string()),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-            )))
-        }
-    };
-
-    let value = input_map
-        .get("value")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let target_node_id = input_map
-        .get("target_node_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("text-llm")
-        .to_string();
-
-    if value.is_empty() {
-        log_info("Empty input received, skipping processing");
-        return Ok(Json(DataType::Map(
-            [
-                ("success".to_string(), DataType::Bool(true)),
-                (
-                    "message".to_string(),
-                    DataType::String("Empty input, no processing needed".to_string()),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        )));
-    }
-
-    log_info(&format!("Processing text input: {}", value));
-
-    let config = with_state(|s| s.config.clone()).unwrap_or_default();
-
-    with_state_mut(|state| {
-        state.process_count += 1;
-    });
-
-    let prompt = format!("{}\n\nUser: {}\n\nAssistant:", config.system_prompt, value);
-    let generated_text = run_inference(&prompt, &config);
-
-    let _ = publish_event(
-        "plugin.output",
-        &serde_json::json!({
-            "source": target_node_id,
-            "port": "output",
-            "data_type": "text",
-            "value": generated_text,
-        }),
-    );
-
-    Ok(Json(DataType::Map(
-        [
-            ("success".to_string(), DataType::Bool(true)),
-            (
-                "output".to_string(),
-                DataType::String(generated_text.clone()),
-            ),
-            (
-                "message".to_string(),
-                DataType::String("Text processed successfully".to_string()),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    )))
-}
-
-/// Health check
+/// Health check.
 #[plugin_fn]
 pub fn health_check(_: Json<DataType>) -> FnResult<Json<DataType>> {
     let running = with_state(|s| s.running).unwrap_or(false);
-    Ok(Json(DataType::Map(
-        [
-            ("healthy".to_string(), DataType::Bool(true)),
-            ("running".to_string(), DataType::Bool(running)),
-            (
-                "message".to_string(),
-                DataType::String("Text-LLM plugin healthy".to_string()),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    )))
+    Ok(Json(
+        DataType::map()
+            .insert("healthy", true)
+            .insert("running", running)
+            .insert("message", "Claude Code agent healthy")
+            .build(),
+    ))
+}
+
+/// Describe the plugin's capabilities.
+#[plugin_fn]
+pub fn describe(_: Json<DataType>) -> FnResult<Json<DataType>> {
+    Ok(Json(
+        DataType::map()
+            .insert("name", AGENT_NAME)
+            .insert("description", AGENT_DESCRIPTION)
+            .insert("label", "acp")
+            .insert(
+                "capabilities",
+                DataType::Array(
+                    CAPABILITIES
+                        .iter()
+                        .map(|(name, desc)| {
+                            DataType::map()
+                                .insert("name", *name)
+                                .insert("description", *desc)
+                                .build()
+                        })
+                        .collect(),
+                ),
+            )
+            .build(),
+    ))
+}
+
+/// Config schema for the UI.
+#[plugin_fn]
+pub fn config_schema(_: Json<DataType>) -> FnResult<Json<DataType>> {
+    Ok(Json(
+        DataType::map()
+            .insert(
+                "max_response_length",
+                DataType::map()
+                    .insert("type", "number")
+                    .insert("default", DataType::Int32(4096))
+                    .insert("description", "Maximum response length in characters")
+                    .build(),
+            )
+            .insert(
+                "auto_poll",
+                DataType::map()
+                    .insert("type", "boolean")
+                    .insert("default", true)
+                    .insert("description", "Automatically poll for incoming messages")
+                    .build(),
+            )
+            .build(),
+    ))
 }

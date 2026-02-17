@@ -1,13 +1,14 @@
 [package]
-name = "text-llm-plugin"
-version.workspace = true
-edition.workspace = true
+name = "magi-claude-code"
+version = "0.1.0"
+edition = "2021"
+description = "ACP agent plugin for Claude Code capabilities"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-magi-pdk = { workspace = true, features = ["guest"] }
-extism-pdk.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+magi-pdk = { git = "https://github.com/shmor3/magi-pdk.git", features = ["guest"] }
+extism-pdk = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
