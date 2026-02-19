@@ -154,7 +154,7 @@ dependencies = [
 [[package]]
 name = "magi-pdk"
 version = "0.1.0"
-source = "git+https://github.com/shmor3/magi-pdk.git#8ca3dc7dba76dedc3b84f68d03106e822b77eac7"
+source = "git+https://github.com/shmor3/magi-pdk.git#3ef090f52a797b99fd4d40d44a5519f00a6bcfbe"
 dependencies = [
  "extism-pdk",
  "serde",

@@ -147,7 +147,22 @@ pub fn init(input: Json<DataType>) -> FnResult<Json<DataType>> {
 
     log_info("Claude Code ACP agent initializing...");
 
-    let agent_id = match agent_register(AGENT_NAME, AGENT_DESCRIPTION, CAPABILITIES) {
+    // Include available models in agent metadata so the UI can offer a model picker
+    let metadata = serde_json::json!({
+        "models": [
+            { "id": "claude-sonnet-4-5-20250929", "name": "Claude Sonnet 4.5", "description": "Fast, intelligent" },
+            { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", "description": "Most capable" },
+            { "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "description": "Fastest, lightweight" }
+        ]
+    });
+    let metadata_str = serde_json::to_string(&metadata).unwrap_or_default();
+
+    let agent_id = match agent_register_with_metadata(
+        AGENT_NAME,
+        AGENT_DESCRIPTION,
+        CAPABILITIES,
+        Some(&metadata_str),
+    ) {
         Ok(id) => {
             log_info(&format!("Registered as ACP agent: {}", id));
             id
@@ -390,25 +405,20 @@ pub fn describe(_: Json<DataType>) -> FnResult<Json<DataType>> {
 
 /// Config schema for the UI.
 #[plugin_fn]
-pub fn config_schema(_: Json<DataType>) -> FnResult<Json<DataType>> {
-    Ok(Json(
-        DataType::map()
-            .insert(
-                "max_response_length",
-                DataType::map()
-                    .insert("type", "number")
-                    .insert("default", DataType::Int32(4096))
-                    .insert("description", "Maximum response length in characters")
-                    .build(),
-            )
-            .insert(
-                "auto_poll",
-                DataType::map()
-                    .insert("type", "boolean")
-                    .insert("default", true)
-                    .insert("description", "Automatically poll for incoming messages")
-                    .build(),
-            )
-            .build(),
-    ))
+pub fn config_schema(_: Json<DataType>) -> FnResult<Json<serde_json::Value>> {
+    Ok(Json(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "max_response_length": {
+                "type": "number",
+                "default": 4096,
+                "description": "Maximum response length in characters"
+            },
+            "auto_poll": {
+                "type": "boolean",
+                "default": true,
+                "description": "Automatically poll for incoming messages"
+            }
+        }
+    })))
 }
